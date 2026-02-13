@@ -12,16 +12,18 @@ import os from "os";
 import path from "path";
 import { fileURLToPath } from "url";
 
-// ✅ app kontextus import (a teljes prompt + app leírás egyben)
 import { APP_CONTEXT } from "./appContext.js";
 
 /* -------- env -------- */
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-dotenv.config({ path: path.join(__dirname, ".env") });
-if (!process.env.OPENAI_API_KEY) {
-  dotenv.config({ path: path.join(__dirname, "..", ".env") });
+// ✅ Dotenv csak lokál fejlesztéshez (Renderen ENV a dashboardról jön)
+if (process.env.NODE_ENV !== "production") {
+  dotenv.config({ path: path.join(__dirname, ".env") });
+  if (!process.env.OPENAI_API_KEY) {
+    dotenv.config({ path: path.join(__dirname, "..", ".env") });
+  }
 }
 
 const PORT = Number(process.env.PORT || 3001);
@@ -54,10 +56,10 @@ app.use(
   })
 );
 
-// CORS (egy helyen, ne duplán)
+// ✅ CORS: ha "*" akkor engedjük minden originről
 app.use(
   cors({
-    origin: ORIGIN,
+    origin: ORIGIN === "*" ? true : ORIGIN,
     methods: ["GET", "POST", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"],
   })
@@ -70,12 +72,10 @@ app.use(
   })
 );
 
-// ✅ Preflight (Express 5 kompatibilis): wildcard helyett regex
+// Preflight
 app.options(/.*/, cors());
 
-/* -------- Rate limit (költségvédelem) --------
-   ⚠️ NINCS custom keyGenerator → így nincs IPv6 warning
----------------------------------------------- */
+// Rate limit
 const limiter = rateLimit({
   windowMs: 60_000,
   max: 60,
@@ -83,13 +83,10 @@ const limiter = rateLimit({
   legacyHeaders: false,
 });
 
-// Health check (publikus lehet)
+// Health check
 app.get("/health", (_req, res) => res.json({ ok: true, time: new Date().toISOString() }));
 
-/* -------- AUTH: anonymous token (JWT) --------
-   Kliens hívja: POST /auth/anonymous
-   Válasz: { token }
----------------------------------------------- */
+/* -------- AUTH: anonymous token (JWT) -------- */
 app.post("/auth/anonymous", (_req, res) => {
   if (!JWT_SECRET) return res.status(500).json({ error: "JWT_SECRET hiányzik" });
 
@@ -108,7 +105,7 @@ function requireJwt(req, res, next) {
 
   try {
     const payload = jwt.verify(token, JWT_SECRET);
-    req.user = payload; // pl. { sub: "..." }
+    req.user = payload;
     next();
   } catch {
     return res.status(401).json({ error: "Invalid token" });
@@ -121,6 +118,8 @@ async function openAIChat(messages, temperature = 0.5) {
   const timeout = setTimeout(() => controller.abort(), 25_000);
 
   try {
+    if (!OPENAI_KEY) throw new Error("OPENAI_API_KEY hiányzik");
+
     const r = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       signal: controller.signal,
@@ -145,11 +144,10 @@ async function openAIChat(messages, temperature = 0.5) {
   }
 }
 
-/* Normalizálás: role + content[] (text / image_url) */
+/* Normalizálás */
 function normalizeMessages(rawArr = []) {
   return rawArr.map((m) => {
     const role = m?.role === "assistant" ? "assistant" : "user";
-
     let content = m?.content;
 
     if (!Array.isArray(content)) {
@@ -174,7 +172,6 @@ function normalizeMessages(rawArr = []) {
 
       if (content.length === 0) content.push({ type: "text", text: "" });
 
-      // max 3 kép / üzenet
       let imgCount = 0;
       content = content.filter((c) => {
         if (c.type !== "image_url") return true;
@@ -190,14 +187,11 @@ function normalizeMessages(rawArr = []) {
 /* -------- chat handler -------- */
 async function chatHandler(req, res) {
   try {
-    if (!OPENAI_KEY) return res.status(500).json({ error: "OPENAI_API_KEY hiányzik" });
-
     const raw = req.body?.messages || [];
     if (!Array.isArray(raw) || raw.length === 0) {
       return res.status(400).json({ error: "Hiányzik a messages tömb." });
     }
 
-    // ✅ system prompt helyett APP_CONTEXT
     const messages = [
       { role: "system", content: [{ type: "text", text: APP_CONTEXT }] },
       ...normalizeMessages(raw),
@@ -212,13 +206,10 @@ async function chatHandler(req, res) {
 
 /* -------- ROUTES (VÉDETT) -------- */
 app.post("/chat", requireJwt, limiter, chatHandler);
-app.post("/ask", requireJwt, limiter, chatHandler); // kompatibilitás
+app.post("/ask", requireJwt, limiter, chatHandler);
 
-/* -------- beszélgetéscím generálás -------- */
 app.post("/title", requireJwt, limiter, async (req, res) => {
   try {
-    if (!OPENAI_KEY) return res.status(500).json({ error: "OPENAI_API_KEY hiányzik" });
-
     const { messages = [] } = req.body || {};
     if (!Array.isArray(messages) || messages.length === 0) {
       return res.status(400).json({ error: "Hiányzik a messages tömb." });
